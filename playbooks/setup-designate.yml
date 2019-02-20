@@ -12,24 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 ---
-- name: Install Designate
+
+- name: Prepare Designate config
   hosts: localhost
   connection: local
   tasks:
-    - name: Add designate role
-      blockinfile:
-        dest: /opt/rpc-openstack/ansible-role-requirements.yml
-        block: |
-          - name: os_designate
-            scm: git
-            src: https://github.com/rcbops/openstack-ansible-os_designate.git
-            version: newton-designate
-      register: role_add
-      when: "{{ rpc_release | version_compare('r14', '>=') and rpc_release | version_compare('r15', '<=') }}"
-      tags: 
-        - designate_role_install
-    
-    - name: Install container definitions
+    - name: Install OSA container environment
       copy:
         src: ../files/inventory/{{ item }}
         dest: /etc/openstack_deploy/env.d/{{ item }}
@@ -40,47 +28,24 @@
         - designate.yml
         - designate_bind.yml
 
-    - name: Install container configuration
+    - name: Install OSA container configuration
       template:
         src: templates/designate_config.yml.j2
         dest: /etc/openstack_deploy/conf.d/designate.yml
       tags:
         - designate_setup
 
-    - name: Install designate group variables
-      copy: 
-        src: /opt/rpc-designate/playbooks/group_vars/designate_all.yml
-        dest: /opt/rpc-openstack/group_vars/designate_all.yml
-      when: "{{ rpc_release | version_compare('r14', '>=') and rpc_release | version_compare('r15', '<=') }}"
-      tags: 
-        - designate_setup
-
     - meta: refresh_inventory
     
-    - name: Discover user secrets file [Pike]
-      stat: 
-        path: /etc/openstack_deploy/user_secrets.yml
-      register: secrets_file_pike
-
-    - name: Discover user secrets file [Newton]
-      stat:
-        path: /etc/openstack_deploy/user_osa_secrets.yml
-      register: secrets_file_newton
-      when: secrets_file_pike.stat.exists == false
-
-    - name: Discover user secrets file
-      set_fact:
-        secrets_file: "{{ secrets_file_pike if secrets_file_pike.stat.exists else secrets_file_newton }}"
-
     - name: Read user secrets file
-      shell: "grep '^[a-zA-Z]' {{ secrets_file.stat.path }}"
+      shell: "grep '^[a-zA-Z]' /etc/openstack_deploy/user_secrets.yml"
       register: user_secrets
       tags: 
         - designate_setup
 
     - name: Add missing secrets
       lineinfile:
-        dest: "{{ secrets_file.stat.path }}"
+        dest: "/etc/openstack_deploy/user_secrets.yml"
         line: "{{ item }}"
       with_items: "{{ secrets }}"
       when: user_secrets.stdout.find("{{ item }}") == -1
@@ -89,14 +54,48 @@
         - designate_setup
 
     - name: Update password file
-      shell: "{{ oa_dir }}/scripts/pw-token-gen.py --file {{ secrets_file.stat.path }}"
+      shell: "{{ oa_dir }}/scripts/pw-token-gen.py --file /etc/openstack_deploy/user_secrets.yml"
       when: secrets_updated.changed
 
-    - name: Create designate_pools.yml
+    - name: Find existing designate_pools.yml
+      stat:
+        file: /etc/openstack_deploy/designate_pools.yml
+      register: old_designate_pools_config
+
+    - name: Rename designate_pools.yml to user_designate_pools.yml
+      file:
+        src: "{{ old_designate_pools_config.stat.path }}"
+        dest: /etc/openstack_deploy/user_designate_pools.yml
+      when: old_designate_pools_config.stat.exists |bool
+
+    - name: Create user_designate_pools.yml
       template: 
         src: templates/designate_pools.yml.j2 
-        dest: /etc/openstack_deploy/designate_pools.yml
+        dest: /etc/openstack_deploy/user_designate_pools.yml
+      when: old_designate_pools_config is not defined or old_designate_pools_config is not success
 
+- name: Setup Designate containers
+  hosts: designate_all:designate_bind:os-infra_hosts
+  tasks:
+    - include: "{{ OA_DIR }}/playbooks/lxc-container-create.yml"
+
+- name: Install Designate API
+  hosts: localhost
+  tasks:
+    - name: Add designate binaries to the repo containers
+      include: "{{ OA_DIR }}/playbooks/repo-install.yml"
+
+    - name: Install Designate API services
+      include: "{{ OA_DIR }}/playbooks/os-designate-install.yml"
+
+    - name: Update haproxy services
+      include: "{{ OA_DIR }}/playbooks/haproxy-install.yml"
+
+    - name: Install BIND
+      include: "setup-bind.yml"
+    
+    - name: Add local firewall forwarding rules
+      include: "setup-infra-firewall-dns.yml"
   vars:
     secrets:
       - "designate_service_password: "

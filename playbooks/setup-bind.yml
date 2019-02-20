@@ -19,7 +19,7 @@
 - name: Install Bind Package
   hosts: designate_bind_all
   tasks:
-    - include: setup-bind-{{ ansible_pkg_mgr }}.yml
+    - include: bind-package-install/setup-bind-{{ ansible_pkg_mgr }}.yml
 
     - name: Pull one of the keys off one of the bind containers
       fetch:
